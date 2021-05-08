@@ -3,11 +3,15 @@ package lokigrus
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
 )
+
+const postPath = "/api/prom/push"
 
 type entry struct {
 	entry *logrus.Entry
@@ -20,6 +24,7 @@ type Hook struct {
 	MaxBatchCount int
 	Data          map[string]string
 
+	labels   string
 	lineChan chan *entry
 	batch    []*entry
 	maxTime  *time.Timer
@@ -47,12 +52,28 @@ func Data(data map[string]string) Option {
 
 func NewHook(lokiURL string, opts ...Option) *Hook {
 	h := &Hook{
-		LokiURL: lokiURL,
+		LokiURL:       lokiURL,
+		MaxBatchAge:   30 * time.Second,
+		MaxBatchCount: 5,
+		lineChan:      make(chan *entry),
 	}
 
 	for _, opt := range opts {
 		opt(h)
 	}
+
+	u, err := url.Parse(h.LokiURL)
+	if err != nil {
+		panic(err)
+	}
+	if !strings.Contains(u.Path, postPath) {
+		u.Path = postPath
+		q := u.Query()
+		u.RawQuery = q.Encode()
+		h.LokiURL = u.String()
+	}
+
+	h.labels = formatLabels(h.Data)
 
 	go h.start()
 	return h
@@ -110,12 +131,10 @@ func (l *Hook) mustSendBatch() {
 
 	l.maxTime.Reset(l.MaxBatchAge)
 
-	labels := formatLabels(l.Data)
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := sendBatch(ctx, l.batch, labels, l.LokiURL); err != nil {
+	if err := sendBatch(ctx, l.batch, l.labels, l.LokiURL); err != nil {
 		fmt.Fprintf(os.Stderr, "failed to send batch: %s", err)
 	}
 
