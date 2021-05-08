@@ -15,8 +15,6 @@ import (
 )
 
 func sendBatch(ctx context.Context, entries []*entry, labels string, lokiURL string) error {
-	fmt.Printf("sending batch with %d entries\n", len(entries))
-
 	adapterEntries := make([]*logproto.EntryAdapter, len(entries))
 
 	for i, e := range entries {
