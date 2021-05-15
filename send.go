@@ -19,7 +19,7 @@ func sendBatch(ctx context.Context, entries []*entry, labels string, lokiURL str
 
 	for i, e := range entries {
 		adapterEntries[i] = &logproto.EntryAdapter{
-			Timestamp: &timestamppb.Timestamp{Seconds: e.entry.Time.Unix()},
+			Timestamp: &timestamppb.Timestamp{Seconds: e.time},
 			Line:      e.str,
 		}
 	}

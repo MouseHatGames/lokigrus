@@ -2,60 +2,84 @@ package lokigrus
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
 	"time"
-
-	"github.com/sirupsen/logrus"
 )
 
 const postPath = "/api/prom/push"
 
+var ErrInvalidJSON = errors.New("invalid json written")
+
 type entry struct {
-	entry *logrus.Entry
-	str   string
+	time int64
+	str  string
 }
 
-type Hook struct {
+type Writer struct {
+	Out           io.Writer
 	LokiURL       string
 	MaxBatchAge   time.Duration
 	MaxBatchCount int
-	Data          map[string]string
+	CheckJSON     bool
+	labels        string
 
-	labels   string
 	lineChan chan *entry
 	batch    []*entry
 	maxTime  *time.Timer
 }
 
-type Option func(*Hook)
+type Option func(*Writer)
 
+// MaxBatchAge is the maximum time after a batch's first entry when the batch will be sent to Loki
+// if there is at least one entry
 func MaxBatchAge(age time.Duration) Option {
-	return func(h *Hook) {
+	return func(h *Writer) {
 		h.MaxBatchAge = age
 	}
 }
 
+// MaxBatchCount is the maximum amount of entries in a batch before it gets sent to Loki
 func MaxBatchCount(count int) Option {
-	return func(h *Hook) {
+	return func(h *Writer) {
 		h.MaxBatchCount = count
 	}
 }
 
+// Data is the labels to be attached to the Loki stream
 func Data(data map[string]string) Option {
-	return func(h *Hook) {
-		h.Data = data
+	return func(h *Writer) {
+		h.labels = formatLabels(data)
 	}
 }
 
-func NewHook(lokiURL string, opts ...Option) *Hook {
-	h := &Hook{
+// Output is the writer where the logs will be written to. Default is os.Stdout, and if nil no logs will be written.
+func Output(w io.Writer) Option {
+	return func(h *Writer) {
+		h.Out = w
+	}
+}
+
+// If true, all entries will be validated as JSON before being sent to Loki
+func CheckJSON(check bool) Option {
+	return func(h *Writer) {
+		h.CheckJSON = check
+	}
+}
+
+func NewWriter(lokiURL string, opts ...Option) *Writer {
+	h := &Writer{
+		Out:           os.Stdout,
 		LokiURL:       lokiURL,
 		MaxBatchAge:   30 * time.Second,
 		MaxBatchCount: 5,
-		lineChan:      make(chan *entry),
+		CheckJSON:     true,
+		lineChan:      make(chan *entry, 5),
 	}
 
 	for _, opt := range opts {
@@ -73,33 +97,33 @@ func NewHook(lokiURL string, opts ...Option) *Hook {
 		h.LokiURL = u.String()
 	}
 
-	h.labels = formatLabels(h.Data)
+	if h.labels == "" {
+		panic("data must be set")
+	}
 
 	go h.start()
 	return h
 }
 
-func (l *Hook) Levels() []logrus.Level {
-	return logrus.AllLevels
-}
-
-func (l *Hook) Fire(ll *logrus.Entry) error {
-	str, err := ll.String()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to format line: %s", err)
-		return err
+func (l *Writer) Write(b []byte) (n int, err error) {
+	if l.CheckJSON && !json.Valid(b) {
+		return 0, ErrInvalidJSON
 	}
 
-	l.lineChan <- &entry{ll, str}
-	return nil
+	l.lineChan <- &entry{time.Now().Unix(), string(b)}
+
+	if l.Out != nil {
+		return l.Out.Write(b)
+	}
+	return len(b), nil
 }
 
-func (l *Hook) Close() error {
+func (l *Writer) Close() error {
 	close(l.lineChan)
 	return nil
 }
 
-func (l *Hook) start() {
+func (l *Writer) start() {
 	l.maxTime = time.NewTimer(l.MaxBatchAge)
 
 	defer l.mustSendBatch()
@@ -124,7 +148,7 @@ loop:
 	}
 }
 
-func (l *Hook) mustSendBatch() {
+func (l *Writer) mustSendBatch() {
 	if len(l.batch) == 0 {
 		return
 	}
