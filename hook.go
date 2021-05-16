@@ -72,6 +72,7 @@ func CheckJSON(check bool) Option {
 	}
 }
 
+// NewWriter creates a new writer that sends the data written into it to a Loki instance.
 func NewWriter(lokiURL string, opts ...Option) *Writer {
 	h := &Writer{
 		Out:           os.Stdout,
@@ -118,9 +119,15 @@ func (l *Writer) Write(b []byte) (n int, err error) {
 	return len(b), nil
 }
 
+// Close closes the input channel.
 func (l *Writer) Close() error {
 	close(l.lineChan)
 	return nil
+}
+
+// Flush synchronously sends the current batched entries (if any) to Loki.
+func (l *Writer) Flush() {
+	l.mustSendBatch()
 }
 
 func (l *Writer) start() {
@@ -148,9 +155,9 @@ loop:
 	}
 }
 
-func (l *Writer) mustSendBatch() {
+func (l *Writer) mustSendBatch() error {
 	if len(l.batch) == 0 {
-		return
+		return nil
 	}
 
 	l.maxTime.Reset(l.MaxBatchAge)
@@ -158,9 +165,11 @@ func (l *Writer) mustSendBatch() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := sendBatch(ctx, l.batch, l.labels, l.LokiURL); err != nil {
-		fmt.Fprintf(os.Stderr, "failed to send batch: %s", err)
+	err := sendBatch(ctx, l.batch, l.labels, l.LokiURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to send batch: %s\n", err)
 	}
 
 	l.batch = nil
+	return err
 }
